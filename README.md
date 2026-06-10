@@ -59,17 +59,30 @@ Artefakt – `1.2.3` ist unveränderlich gedacht, `latest` und `1` wandern weite
    git push origin v1.0.0
    ```
    → Pipeline pusht zusätzlich `1.0.0`, `1.0` und `1`.
-4. **Artefakt konsumieren:**
+4. **Artefakt konsumieren** (siehe [`docker-compose.yml`](docker-compose.yml)):
    ```bash
-   docker run -p 3000:3000 ghcr.io/realap/clean-infrastructure:latest
+   docker compose up              # zieht :latest aus ghcr.io
+   TAG=1.0.0 docker compose up    # exakt Version 1.0.0
    ```
    → <http://localhost:3000> zeigt Version + Commit des Images. Danach `v1.0.1` taggen und
-   vorführen, wie `1.0` und `1` weiterwandern, `1.0.0` aber stehen bleibt.
+   vorführen, wie `1.0` und `1` weiterwandern, `1.0.0` aber stehen bleibt – nur durch
+   Wechsel der `TAG`-Variable, ohne irgendetwas neu zu bauen.
 
 > Hinweis: Beim ersten Push legt GitHub das Package privat an. Für `docker pull` ohne Login das
 > Package unter *Packages → clean-infrastructure → Package settings* auf **public** stellen.
 
-## Lokal entwickeln
+## Starten & lokal entwickeln
+
+Das fertige Artefakt aus der Registry starten (Konsumentensicht):
+
+```bash
+docker compose up                  # :latest
+TAG=1.0.0 docker compose up        # bestimmte Version
+# oder ohne Compose:
+docker run -p 3000:3000 ghcr.io/realap/clean-infrastructure:latest
+```
+
+Aus dem Quellcode entwickeln (Produzentensicht):
 
 ```bash
 npm install
