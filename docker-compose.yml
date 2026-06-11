@@ -1,7 +1,8 @@
 # Konsumentensicht der Pipeline: Dieses Compose-File baut nichts selbst,
 # sondern zieht das fertige Artefakt aus der Registry.
 #
-#   docker compose up                    → läuft mit :latest
+#   docker compose up                    → :latest (= letztes Production-Release)
+#   TAG=staging docker compose up        → aktueller Staging-Stand von main
 #   TAG=1.0.0  docker compose up         → exakt Version 1.0.0
 #   TAG=1      docker compose up         → neueste 1.x
 #   TAG=sha-ca69535 docker compose up    → exakt dieser Commit
@@ -11,6 +12,5 @@
 services:
   app:
     image: ghcr.io/realap/clean-infrastructure:${TAG:-latest}
-    build: .
     ports:
       - "3000:3000"
