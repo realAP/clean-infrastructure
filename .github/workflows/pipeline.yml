@@ -4,23 +4,23 @@
 # Aufbau nach dem klassischen CI/CD-Stufenmodell
 # (https://github.com/resources/articles/ci-cd):
 #
-#   Continuous Integration                Continuous Delivery
-#   ┌───────┐   ┌──────┐   ┌──────────┐    ┌─────────┐     ┌────────────┐
-#   │ Build │──▶│ Test │──▶│ Artifact │──┬▶│ Staging │ ┄┄▶ │ Production │
-#   └───────┘   └──────┘   └──────────┘  │ └─────────┘     └────────────┘
-#                                        │   Push auf main    Tag v*.*.*
-#                                        └────────────────────────▲
+#   Continuous Integration                 Continuous Delivery
+#   ┌───────┐   ┌──────┐   ┌──────────┐   ┌────────────────────┐
+#   │ Build │──▶│ Test │──▶│ Artifact │──▶│ Deliver (ghcr.io)  │
+#   └───────┘   └──────┘   └──────────┘   └────────────────────┘
 #
 # Pull Requests durchlaufen nur die CI (Build → Test → Artifact).
-# Ein Push auf main liefert das Image nach STAGING aus
-#   (Image-Tags: main, sha-…, staging).
-# Die Promotion nach PRODUCTION ist ein Versions-Tag:
-#   git tag v1.2.3 && git push origin v1.2.3
-#   (Image-Tags: 1.2.3, 1.2, 1, sha-…, latest, production)
+# Die Delivery verpackt das CI-Artefakt in ein Docker-Image und pusht
+# es – welche Tags es bekommt, hängt am Git-Ereignis:
+#
+#   Push auf main → dev, sha-…                       (Entwicklungsstand)
+#   Tag v1.2.3    → 1.2.3, 1.2, 1, latest, sha-…     (Release)
+#
+# dev ist bewusst NICHT latest: latest zeigt immer auf das letzte
+# Release, dev auf den aktuellen Stand von main.
 #
 # Ausgeliefert wird immer das CI-Artefakt (app-bundle): Was getestet
 # wurde, wird verpackt – die CD baut nichts neu.
-# Registry: GitHub Container Registry (ghcr.io).
 # ===========================================================================
 name: CI/CD Pipeline
 
@@ -78,7 +78,7 @@ jobs:
           node-version: 22
           cache: npm
       # Das Artefakt: App-Code + Produktions-Dependencies, ohne Dev-Kram.
-      # Genau dieses Bundle wird später von Staging/Production verpackt.
+      # Genau dieses Bundle wird später von der Delivery verpackt.
       - name: Artefakt bauen
         run: |
           npm ci --omit=dev
@@ -91,13 +91,14 @@ jobs:
           retention-days: 7
 
   # --- Continuous Delivery ----------------------------------------------
-  # Staging: jeder Push auf main liefert das Image mit Staging-Tags aus.
-  staging:
-    name: "CD · Staging"
+  # Eine Stage für alles: Sie verpackt das CI-Artefakt und pusht das
+  # Image. Nur die Tags unterscheiden sich je nach Git-Ereignis
+  # (siehe "Image-Tags ableiten").
+  deliver:
+    name: "CD · Deliver"
     runs-on: ubuntu-latest
     needs: artifact
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: staging
+    if: github.event_name == 'push' # main-Push oder Versions-Tag, kein PR
     permissions:
       contents: read
       packages: write # erlaubt den Push nach ghcr.io via GITHUB_TOKEN
@@ -120,6 +121,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tagging-Strategie:
+      #   Push auf main → dev (wandernder Entwicklungsstand, NICHT latest)
+      #   Tag v1.2.3    → Semver-Kaskade 1.2.3 / 1.2 / 1 + latest
+      #   immer         → sha-<commit> (exakt dieser Build)
       - name: Image-Tags & Labels ableiten
         id: meta
         uses: docker/metadata-action@v5
@@ -127,75 +132,12 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: latest=false
           tags: |
-            type=ref,event=branch
-            type=sha
-            type=raw,value=staging
-
-      - name: Build-Zeitpunkt festhalten
-        id: build-time
-        run: echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Image verpacken und pushen
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            APP_VERSION=${{ steps.meta.outputs.version }}
-            GIT_SHA=${{ github.sha }}
-            BUILD_TIME=${{ steps.build-time.outputs.time }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # Production: nur ein Versions-Tag (v1.2.3) liefert nach Production aus.
-  # Tipp für die Demo: Im Repo unter Settings → Environments → production
-  # "Required reviewers" eintragen – dann pausiert der Job hier, bis
-  # jemand die Auslieferung manuell freigibt.
-  production:
-    name: "CD · Production"
-    runs-on: ubuntu-latest
-    needs: artifact
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    environment: production
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: CI-Artefakt laden
-        uses: actions/download-artifact@v4
-        with:
-          name: app-bundle
-      - name: Artefakt entpacken
-        run: tar -xzf app-bundle.tgz
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Login bei der GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Semver-Kaskade: v1.2.3 → 1.2.3, 1.2, 1 – plus die wandernden
-      # Zeiger latest und production.
-      - name: Image-Tags & Labels ableiten
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          flavor: latest=false
-          tags: |
+            type=raw,value=dev,enable={{is_default_branch}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=sha
-            type=raw,value=latest
-            type=raw,value=production
 
       - name: Build-Zeitpunkt festhalten
         id: build-time
