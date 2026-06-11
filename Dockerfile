@@ -1,25 +1,22 @@
 # ---------------------------------------------------------------------------
-# Stage 1: Dependencies installieren
-# Nur package.json + Lockfile kopieren, damit Docker diesen Layer cachen kann,
-# solange sich die Dependencies nicht ändern.
-# ---------------------------------------------------------------------------
-FROM node:22-alpine AS deps
-
-WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-# ---------------------------------------------------------------------------
-# Stage 2: Schlankes Runtime-Image
-# Enthält nur Produktions-Dependencies und den App-Code – keine Build-Tools.
+# Dieses Dockerfile baut nichts – das ist Absicht.
+#
+# Das Artefakt (App-Code + Produktions-Dependencies) wird von der Pipeline
+# gebaut (Job "deliver": npm ci --omit=dev). Hier wird es nur noch in ein
+# schlankes Runtime-Image verpackt und gestartet. Dadurch gibt es keine
+# doppelten Build-Schritte zwischen Pipeline und Dockerfile.
+#
+# Lokal nachstellen:
+#   npm ci --omit=dev && docker build -t clean-infrastructure-demo .
 # ---------------------------------------------------------------------------
 FROM node:22-alpine
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
+# Fertig gebautes Artefakt übernehmen – kein npm im Image-Build.
 COPY package.json ./
+COPY node_modules ./node_modules
 COPY src ./src
 COPY public ./public
 

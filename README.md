@@ -20,7 +20,7 @@ flowchart LR
         T[Test]
     end
     subgraph CD [Continuous Delivery]
-        B[Docker Build] --> P[Push nach ghcr.io]
+        B[Artefakt bauen] --> V[Image verpacken] --> P[Push nach ghcr.io]
     end
     L --> B
     T --> B
@@ -30,8 +30,10 @@ flowchart LR
 Feedback, parallele Jobs.
 
 **Continuous Delivery** (`deliver`) läuft erst, wenn die CI grün ist (`needs: [lint, test]`).
-Das Docker-Image wird immer gebaut (auch im PR, um das Dockerfile zu validieren), aber nur bei
-einem Push auf `main` oder einem Versions-Tag in die Registry gepusht. Das Artefakt landet in der
+Die Arbeitsteilung ist bewusst strikt: **Die Pipeline baut das Artefakt** (`npm ci --omit=dev`),
+**das Dockerfile verpackt es nur noch** und startet die App – keine doppelten Build-Schritte.
+Gebaut wird immer (auch im PR, um den Ablauf zu validieren), aber nur bei einem Push auf `main`
+oder einem Versions-Tag in die Registry gepusht. Das Artefakt landet in der
 **GitHub Container Registry** (`ghcr.io`) – ohne zusätzliche Secrets, der `GITHUB_TOKEN` reicht.
 
 ## Tagging-Strategien
@@ -91,21 +93,26 @@ npm test         # Tests (node:test, ohne Test-Framework-Zoo)
 npm run lint     # ESLint
 ```
 
-Docker-Build lokal nachstellen:
+Docker-Build lokal nachstellen (erst das Artefakt bauen – wie in der Pipeline,
+das Dockerfile kopiert `node_modules` nur noch hinein):
 
 ```bash
+npm ci --omit=dev
 docker build -t clean-infrastructure-demo \
   --build-arg APP_VERSION=local \
   --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
   --build-arg BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) .
 docker run -p 3000:3000 clean-infrastructure-demo
+npm install   # danach Dev-Dependencies wiederherstellen
 ```
 
 ## Clean-Infrastructure-Details, die sich zu zeigen lohnen
 
-- **Multi-Stage-Dockerfile:** Dependencies werden in einer eigenen Stage installiert; das
-  Runtime-Image enthält weder Build-Tools noch Dev-Dependencies und läuft als `node`-User
-  statt root.
+- **Arbeitsteilung Pipeline ↔ Dockerfile:** Die Pipeline baut das Artefakt, das Dockerfile
+  verpackt es nur (kein `npm` im Image-Build) – dadurch keine doppelten Build-Schritte und ein
+  Runtime-Image ohne Build-Tools und Dev-Dependencies, das als `node`-User statt root läuft.
+  (Die Alternative – ein Multi-Stage-Build, der hermetisch im Docker-Build installiert – ist
+  ein guter Diskussionspunkt für die Vorlesung.)
 - **`npm ci` statt `npm install`:** In der Pipeline wird exakt das Lockfile installiert –
   reproduzierbare Builds.
 - **Build-Args als Herkunftsnachweis:** Version, Commit und Build-Zeit werden ins Image
