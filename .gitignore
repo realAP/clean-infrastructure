@@ -141,3 +141,6 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# CI artifact bundle (created by the pipeline)
+app-bundle.tgz

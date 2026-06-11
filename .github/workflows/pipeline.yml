@@ -1,30 +1,33 @@
 # ===========================================================================
 # CI/CD-Pipeline für die Vorlesung "Clean Infrastructure"
 #
-#   ┌──────┐
-#   │ Lint │──┐
-#   └──────┘  │    ┌──────────────────────┐
-#             ├───▶│ Deliver:             │
-#   ┌──────┐  │    │ Docker Build & Push  │
-#   │ Test │──┘    └──────────────────────┘
-#   └──────┘
+# Aufbau nach dem klassischen CI/CD-Stufenmodell
+# (https://github.com/resources/articles/ci-cd):
 #
-# Continuous Integration (lint, test):
-#   läuft bei JEDEM Push und JEDEM Pull Request.
+#   Continuous Integration                Continuous Delivery
+#   ┌───────┐   ┌──────┐   ┌──────────┐    ┌─────────┐     ┌────────────┐
+#   │ Build │──▶│ Test │──▶│ Artifact │──┬▶│ Staging │ ┄┄▶ │ Production │
+#   └───────┘   └──────┘   └──────────┘  │ └─────────┘     └────────────┘
+#                                        │   Push auf main    Tag v*.*.*
+#                                        └────────────────────────▲
 #
-# Continuous Delivery (deliver):
-#   baut das Artefakt (npm ci --omit=dev) und verpackt es in ein
-#   Docker-Image – das Dockerfile selbst führt keine Build-Schritte aus.
-#   Gebaut wird immer (validiert den Ablauf auch im PR), gepusht nur bei
-#   Push auf main oder bei einem Versions-Tag.
-#   Artefakt-Registry: GitHub Container Registry (ghcr.io).
+# Pull Requests durchlaufen nur die CI (Build → Test → Artifact).
+# Ein Push auf main liefert das Image nach STAGING aus
+#   (Image-Tags: main, sha-…, staging).
+# Die Promotion nach PRODUCTION ist ein Versions-Tag:
+#   git tag v1.2.3 && git push origin v1.2.3
+#   (Image-Tags: 1.2.3, 1.2, 1, sha-…, latest, production)
+#
+# Ausgeliefert wird immer das CI-Artefakt (app-bundle): Was getestet
+# wurde, wird verpackt – die CD baut nichts neu.
+# Registry: GitHub Container Registry (ghcr.io).
 # ===========================================================================
 name: CI/CD Pipeline
 
 on:
   push:
     branches: [main]
-    tags: ["v*.*.*"] # Release-Tags wie v1.2.3 lösen die Semver-Tags aus
+    tags: ["v*.*.*"]
   pull_request:
 
 env:
@@ -33,8 +36,8 @@ env:
 
 jobs:
   # --- Continuous Integration -------------------------------------------
-  lint:
-    name: "CI · Lint"
+  build:
+    name: "CI · Build"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -42,12 +45,16 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run lint
+      # Node hat keinen Compile-Schritt – "bauen" heißt hier: Dependencies
+      # exakt nach Lockfile auflösen und installieren. Bei kompilierten
+      # Sprachen stünde an dieser Stelle javac/tsc/go build.
+      - name: Dependencies installieren
+        run: npm ci
 
   test:
     name: "CI · Test"
     runs-on: ubuntu-latest
+    needs: build
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -55,71 +62,150 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
+      - name: Statische Analyse (Lint)
+        run: npm run lint
+      - name: Tests
+        run: npm test
 
-  # --- Continuous Delivery ----------------------------------------------
-  deliver:
-    name: "CD · Docker Build & Push"
+  artifact:
+    name: "CI · Artifact"
     runs-on: ubuntu-latest
-    needs: [lint, test] # erst ausliefern, wenn die CI grün ist
-    permissions:
-      contents: read
-      packages: write # erlaubt den Push nach ghcr.io via GITHUB_TOKEN
-
+    needs: test
     steps:
       - uses: actions/checkout@v5
-
       - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
+      # Das Artefakt: App-Code + Produktions-Dependencies, ohne Dev-Kram.
+      # Genau dieses Bundle wird später von Staging/Production verpackt.
+      - name: Artefakt bauen
+        run: |
+          npm ci --omit=dev
+          tar -czf app-bundle.tgz package.json node_modules src public
+      - name: Artefakt veröffentlichen
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-bundle
+          path: app-bundle.tgz
+          retention-days: 7
 
-      # Hier entsteht das Artefakt: App-Code + Produktions-Dependencies.
-      # Das Dockerfile baut nichts mehr selbst, es verpackt nur noch.
-      - name: Artefakt bauen (Produktions-Dependencies)
-        run: npm ci --omit=dev
+  # --- Continuous Delivery ----------------------------------------------
+  # Staging: jeder Push auf main liefert das Image mit Staging-Tags aus.
+  staging:
+    name: "CD · Staging"
+    runs-on: ubuntu-latest
+    needs: artifact
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+    permissions:
+      contents: read
+      packages: write # erlaubt den Push nach ghcr.io via GITHUB_TOKEN
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: CI-Artefakt laden
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+      - name: Artefakt entpacken
+        run: tar -xzf app-bundle.tgz
 
       - uses: docker/setup-buildx-action@v3
 
       - name: Login bei der GitHub Container Registry
-        # Im PR wird nicht gepusht, also ist auch kein Login nötig.
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Hier passiert die Tagging-Magie. Aus dem Git-Kontext werden
-      # automatisch die passenden Image-Tags abgeleitet:
-      #
-      #   Push auf main      → main, sha-<commit>, latest
-      #   Git-Tag v1.2.3     → 1.2.3, 1.2, 1, sha-<commit>, latest
-      #   Pull Request #7    → pr-7 (nur Probe-Build, kein Push)
       - name: Image-Tags & Labels ableiten
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
             type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=staging
 
       - name: Build-Zeitpunkt festhalten
         id: build-time
         run: echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Docker-Image bauen (und pushen)
+      - name: Image verpacken und pushen
         uses: docker/build-push-action@v6
         with:
           context: .
-          # Im PR nur bauen (Dockerfile validieren), nicht ausliefern:
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.build-time.outputs.time }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Production: nur ein Versions-Tag (v1.2.3) liefert nach Production aus.
+  # Tipp für die Demo: Im Repo unter Settings → Environments → production
+  # "Required reviewers" eintragen – dann pausiert der Job hier, bis
+  # jemand die Auslieferung manuell freigibt.
+  production:
+    name: "CD · Production"
+    runs-on: ubuntu-latest
+    needs: artifact
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: CI-Artefakt laden
+        uses: actions/download-artifact@v4
+        with:
+          name: app-bundle
+      - name: Artefakt entpacken
+        run: tar -xzf app-bundle.tgz
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login bei der GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Semver-Kaskade: v1.2.3 → 1.2.3, 1.2, 1 – plus die wandernden
+      # Zeiger latest und production.
+      - name: Image-Tags & Labels ableiten
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+            type=raw,value=latest
+            type=raw,value=production
+
+      - name: Build-Zeitpunkt festhalten
+        id: build-time
+        run: echo "time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Image verpacken und pushen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
