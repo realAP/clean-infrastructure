@@ -11,5 +11,6 @@
 services:
   app:
     image: ghcr.io/realap/clean-infrastructure:${TAG:-latest}
+    build: .
     ports:
       - "3000:3000"
